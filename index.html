@@ -2,21 +2,471 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8" />
-  <title>3D Shooter Game</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="stylesheet" href="style.css" />
+  <title>Echos von Aeris - Komplett</title>
+  <style>
+    html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+    canvas { display: block; background: #111; }
+    #hud {
+      position: absolute; top: 10px; left: 10px;
+      font-family: monospace; color: white; font-size: 18px; z-index: 10;
+      user-select: none;
+    }
+    #mobileControls {
+      position: fixed; bottom: 10px; left: 10px; right: 10px; z-index: 15;
+      display: flex; justify-content: space-around; max-width: 500px; margin: auto;
+      user-select: none;
+    }
+    .btn {
+      background: rgba(255,255,255,0.1);
+      border-radius: 10px;
+      width: 60px; height: 60px;
+      color: white;
+      font-size: 20px;
+      line-height: 60px;
+      text-align: center;
+      user-select: none;
+      touch-action: none;
+      user-select:none;
+    }
+    .btn:active {
+      background: rgba(255,255,255,0.4);
+    }
+  </style>
 </head>
 <body>
-  <div id="hud">
-    <div id="health">Leben: 100</div>
-    <div id="stamina">Stamina: 100</div>
-    <button id="btn-shoot">🔫</button>
-    <button id="btn-reload">🔄</button>
-    <button id="btn-aim">🎯</button>
-    <button id="btn-sprint">🏃</button>
-  </div>
   <canvas id="game"></canvas>
-  <script src="libs/three.min.js"></script>
-  <script src="script.js"></script>
+  <div id="hud">
+    ❤️ <span id="health">100</span> &nbsp;
+    ⚡ <span id="stamina">100</span> &nbsp;
+    🧰 <span id="inventory"></span>
+  </div>
+
+  <div id="mobileControls" style="display:none;">
+    <div class="btn" id="btnUp">↑</div>
+    <div class="btn" id="btnLeft">←</div>
+    <div class="btn" id="btnDown">↓</div>
+    <div class="btn" id="btnRight">→</div>
+    <div class="btn" id="btnShoot">⚫</div>
+    <div class="btn" id="btnReload">R</div>
+    <div class="btn" id="btnSprint">⇧</div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    let w = window.innerWidth;
+    let h = window.innerHeight;
+    canvas.width = w;
+    canvas.height = h;
+
+    // Mobile detection for controls
+    const mobile = /Mobi|Android/i.test(navigator.userAgent);
+    if (mobile) document.getElementById('mobileControls').style.display = 'flex';
+
+    // --- Input ---
+    const keys = {};
+    document.addEventListener('keydown', e => {
+      keys[e.key.toLowerCase()] = true;
+      if (['1','2','3'].includes(e.key)) switchWeapon(parseInt(e.key)-1);
+      if (e.key.toLowerCase() === 'q') dropWeapon();
+      if (e.key.toLowerCase() === 'r') startReload();
+    });
+    document.addEventListener('keyup', e => {
+      keys[e.key.toLowerCase()] = false;
+    });
+
+    // Mobile buttons
+    const btnUp = document.getElementById('btnUp');
+    const btnDown = document.getElementById('btnDown');
+    const btnLeft = document.getElementById('btnLeft');
+    const btnRight = document.getElementById('btnRight');
+    const btnShoot = document.getElementById('btnShoot');
+    const btnReload = document.getElementById('btnReload');
+    const btnSprint = document.getElementById('btnSprint');
+
+    // Track mobile touches
+    function setKey(k, v) { keys[k] = v; }
+    [btnUp, btnDown, btnLeft, btnRight, btnShoot, btnReload, btnSprint].forEach(btn => {
+      btn.addEventListener('touchstart', e => { e.preventDefault(); setKey(btn.id.replace('btn','').toLowerCase(), true); });
+      btn.addEventListener('touchend', e => { e.preventDefault(); setKey(btn.id.replace('btn','').toLowerCase(), false); });
+    });
+
+    // Mouse aiming
+    let mouse = {x: w/2, y: h/2};
+    canvas.addEventListener('mousemove', e => {
+      mouse.x = e.clientX;
+      mouse.y = e.clientY;
+    });
+    canvas.addEventListener('mousedown', e => {
+      shoot();
+    });
+
+    // --- Player ---
+    const player = {
+      x: w/2,
+      y: h/2,
+      radius: 20,
+      color: 'cyan',
+      speed: 2.5,
+      health: 100,
+      stamina: 100,
+      sprinting: false,
+      inventory: [],
+      activeSlot: 0,
+      armor: 0,
+      cooldown: 0
+    };
+
+    // --- Weapons ---
+    const weaponsData = [
+      { name: "Pistole", rate: 20, speed: 8, damage: 20, magazine: 7, ammo: 21, reloadTime: 60 },
+      { name: "MG", rate: 5, speed: 12, damage: 5, magazine: 30, ammo: 90, reloadTime: 120 },
+      { name: "Laser", rate: 1, speed: 16, damage: 10, magazine: 5, ammo: 15, reloadTime: 90 }
+    ];
+
+    // Initialize inventory with copies including currentMag
+    weaponsData.forEach(wpn => {
+      player.inventory.push({...wpn, currentMag: wpn.magazine});
+    });
+
+    let reloading = false;
+    let reloadCounter = 0;
+
+    // --- Entities ---
+    const bullets = [];
+    const loot = [];
+    const enemies = [];
+
+    // --- Spawn loot (weapons) ---
+    function spawnLoot() {
+      weaponsData.forEach(wpn => {
+        loot.push({
+          x: Math.random() * w,
+          y: Math.random() * h,
+          radius: 10,
+          color: 'gold',
+          weapon: {...wpn}
+        });
+      });
+    }
+    spawnLoot();
+
+    // --- Spawn enemies ---
+    function spawnEnemy(type=0) {
+      let enemy = {
+        x: Math.random() * w,
+        y: Math.random() * h,
+        radius: 20,
+        health: 80 + Math.random() * 40,
+        speed: 1.2 + Math.random(),
+        color: 'crimson',
+        type: type // 0 = melee, 1 = shooter
+      };
+      if(type === 1){
+        enemy.shootCooldown = 0;
+      }
+      enemies.push(enemy);
+    }
+    for(let i=0; i<3; i++) spawnEnemy(0);
+    for(let i=0; i<2; i++) spawnEnemy(1);
+
+    // --- Weapon switch ---
+    function switchWeapon(slot){
+      if(player.inventory[slot]) player.activeSlot = slot;
+    }
+
+    // --- Drop weapon ---
+    function dropWeapon(){
+      const w = player.inventory[player.activeSlot];
+      if(w){
+        loot.push({
+          x: player.x + Math.random()*30-15,
+          y: player.y + Math.random()*30-15,
+          radius: 10,
+          color: 'gold',
+          weapon: {...w}
+        });
+        player.inventory[player.activeSlot] = null;
+        // Auto switch to next available weapon
+        for(let i=0; i<player.inventory.length; i++){
+          if(player.inventory[i]) {
+            player.activeSlot = i;
+            break;
+          }
+        }
+      }
+    }
+
+    // --- Reload ---
+    function startReload(){
+      if(reloading) return;
+      const weapon = player.inventory[player.activeSlot];
+      if(!weapon) return;
+      if(weapon.ammo <= 0 || weapon.currentMag === weapon.magazine) return;
+      reloading = true;
+      reloadCounter = weapon.reloadTime;
+    }
+
+    // --- Shoot ---
+    function shoot(){
+      if(reloading) return;
+      const weapon = player.inventory[player.activeSlot];
+      if(!weapon || player.cooldown > 0) return;
+      if(weapon.currentMag <= 0){
+        startReload();
+        return;
+      }
+      const angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+      bullets.push({
+        x: player.x,
+        y: player.y,
+        dx: Math.cos(angle) * weapon.speed,
+        dy: Math.sin(angle) * weapon.speed,
+        radius: 5,
+        damage: weapon.damage
+      });
+      player.cooldown = weapon.rate;
+      weapon.currentMag--;
+      playSound('shoot');
+    }
+
+    // --- Sounds ---
+    const sounds = {};
+    function loadSound(name, url){
+      const audio = new Audio(url);
+      sounds[name] = audio;
+    }
+    function playSound(name){
+      if(sounds[name]){
+        const snd = sounds[name].cloneNode();
+        snd.volume = 0.2;
+        snd.play();
+      }
+    }
+    // Load sounds
+    loadSound('shoot','https://freesound.org/data/previews/466/466349_7037-lq.mp3');
+    loadSound('reload','https://freesound.org/data/previews/331/331912_3248244-lq.mp3');
+    loadSound('hurt','https://freesound.org/data/previews/131/131660_2398407-lq.mp3');
+
+    // --- Update ---
+    function update(){
+      // Movement vector
+      let dx=0, dy=0;
+      if(keys['w'] || keys['up']) dy -= 1;
+      if(keys['s'] || keys['down']) dy += 1;
+      if(keys['a'] || keys['left']) dx -= 1;
+      if(keys['d'] || keys['right']) dx += 1;
+      const len = Math.hypot(dx, dy);
+      if(len>0){ dx/=len; dy/=len; }
+
+      player.sprinting = (keys['shift'] || keys['sprint']) && player.stamina > 0 && (dx!==0 || dy!==0);
+      const moveSpeed = player.sprinting ? player.speed * 2 : player.speed;
+
+      if(player.sprinting) player.stamina -= 0.8;
+      else player.stamina += 0.5;
+      player.stamina = Math.min(100, Math.max(0, player.stamina));
+
+      player.x += dx * moveSpeed;
+      player.y += dy * moveSpeed;
+      player.x = Math.min(w - player.radius, Math.max(player.radius, player.x));
+      player.y = Math.min(h - player.radius, Math.max(player.radius, player.y));
+
+      if(player.cooldown > 0) player.cooldown--;
+
+      if(reloading){
+        reloadCounter--;
+        if(reloadCounter <= 0){
+          const weapon = player.inventory[player.activeSlot];
+          if(weapon){
+            const need = weapon.magazine - weapon.currentMag;
+            const take = Math.min(need, weapon.ammo);
+            weapon.currentMag += take;
+            weapon.ammo -= take;
+          }
+          reloading = false;
+          playSound('reload');
+        }
+      }
+
+      // Loot pickup
+      loot.forEach((item,i) => {
+        if(!item.weapon) return;
+        const dist = Math.hypot(player.x - item.x, player.y - item.y);
+        if(dist < player.radius + item.radius){
+          for(let j=0; j<3; j++){
+            if(!player.inventory[j]){
+              player.inventory[j] = {...item.weapon, currentMag: item.weapon.magazine};
+              loot.splice(i,1);
+              break;
+            }
+          }
+        }
+      });
+
+      // Bullets move + collision
+      bullets.forEach((b,i) => {
+        b.x += b.dx;
+        b.y += b.dy;
+        if(b.x < 0 || b.y < 0 || b.x > w || b.y > h){
+          bullets.splice(i,1);
+          return;
+        }
+        enemies.forEach((e,j) => {
+          const dist = Math.hypot(b.x - e.x, b.y - e.y);
+          if(dist < e.radius + b.radius){
+            e.health -= b.damage;
+            bullets.splice(i,1);
+          }
+        });
+      });
+
+      // Remove dead enemies + spawn new
+      for(let i=enemies.length-1; i>=0; i--){
+        if(enemies[i].health <= 0){
+          enemies.splice(i,1);
+          spawnEnemy(Math.random()<0.5 ? 0 : 1);
+        }
+      }
+
+      // Enemy AI
+      enemies.forEach(e => {
+        const dx = player.x - e.x;
+        const dy = player.y - e.y;
+        const dist = Math.hypot(dx, dy);
+
+        if(e.type === 0){
+          // Melee enemy runs to player
+          if(dist > 0){
+            e.x += (dx / dist) * e.speed;
+            e.y += (dy / dist) * e.speed;
+          }
+          if(dist < e.radius + player.radius){
+            const dmg = 0.3 - player.armor*0.1;
+            player.health -= Math.max(0.1, dmg);
+            playSound('hurt');
+          }
+        } else if(e.type === 1){
+          // Shooter enemy: keeps distance, shoots
+          if(dist > 200){
+            e.x += (dx / dist) * e.speed;
+            e.y += (dy / dist) * e.speed;
+          } else if(dist < 150){
+            e.x -= (dx / dist) * e.speed;
+            e.y -= (dy / dist) * e.speed;
+          }
+
+          e.shootCooldown--;
+          if(e.shootCooldown <= 0 && dist < 300){
+            e.shootCooldown = 90;
+            const angle = Math.atan2(player.y - e.y, player.x - e.x);
+            bullets.push({
+              x: e.x,
+              y: e.y,
+              dx: Math.cos(angle) * 6,
+              dy: Math.sin(angle) * 6,
+              radius: 5,
+              damage: 8,
+              fromEnemy: true
+            });
+            playSound('shoot');
+          }
+        }
+      });
+
+      // Bullets hitting player
+      bullets.forEach((b,i) => {
+        if(b.fromEnemy){
+          const dist = Math.hypot(b.x - player.x, b.y - player.y);
+          if(dist < player.radius + b.radius){
+            player.health -= b.damage;
+            playSound('hurt');
+            bullets.splice(i,1);
+          }
+        }
+      });
+
+      // Player death
+      if(player.health <= 0){
+        alert("Game Over! Refresh zum neu starten.");
+        document.location.reload();
+      }
+
+      // Update HUD
+      document.getElementById('health').textContent = Math.round(player.health);
+      document.getElementById('stamina').textContent = Math.round(player.stamina);
+      let invStr = '';
+      player.inventory.forEach((w,i) => {
+        if(w) invStr += `${i+1}:${w.name} `;
+        else invStr += `${i+1}:[leer] `;
+      });
+      document.getElementById('inventory').textContent = invStr.trim();
+    }
+
+    // --- Draw ---
+    function draw(){
+      ctx.clearRect(0,0,w,h);
+
+      // Draw player
+      ctx.fillStyle = player.color;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.radius, 0, Math.PI*2);
+      ctx.fill();
+
+      // Draw active weapon barrel direction
+      const angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(player.x, player.y);
+      ctx.lineTo(player.x + Math.cos(angle)*player.radius*1.5, player.y + Math.sin(angle)*player.radius*1.5);
+      ctx.stroke();
+
+      // Draw bullets
+      bullets.forEach(b => {
+        ctx.fillStyle = b.fromEnemy ? 'red' : 'yellow';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.radius, 0, Math.PI*2);
+        ctx.fill();
+      });
+
+      // Draw loot
+      loot.forEach(l => {
+        ctx.fillStyle = l.color;
+        ctx.beginPath();
+        ctx.rect(l.x - l.radius, l.y - l.radius, l.radius*2, l.radius*2);
+        ctx.fill();
+        ctx.fillStyle = 'black';
+        ctx.font = '10px monospace';
+        ctx.fillText(l.weapon.name, l.x - l.radius, l.y - l.radius - 2);
+      });
+
+      // Draw enemies
+      enemies.forEach(e => {
+        ctx.fillStyle = e.color;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.radius, 0, Math.PI*2);
+        ctx.fill();
+        // Health bar enemy
+        ctx.fillStyle = 'lime';
+        ctx.fillRect(e.x - e.radius, e.y - e.radius - 10, (e.health / 120) * e.radius * 2, 5);
+      });
+
+      // Reload text
+      if(reloading){
+        ctx.fillStyle = 'white';
+        ctx.font = '30px monospace';
+        ctx.fillText('Nachladen...', w/2 - 70, h/2);
+      }
+    }
+
+    // --- Game Loop ---
+    function loop(){
+      update();
+      draw();
+      requestAnimationFrame(loop);
+    }
+    loop();
+
+  </script>
 </body>
 </html>
